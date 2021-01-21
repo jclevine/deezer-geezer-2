@@ -1,6 +1,8 @@
 import requests
 import json
 from .playlist import Playlist
+from .track import Track
+from tqdm import tqdm
 
 
 class PyDeez:
@@ -18,15 +20,36 @@ class PyDeez:
         }
 
     def get_playlists(self, prefixes=None):
-        all_playlists = self.api_call(self._MY_PLAYLISTS_URL)
+        all_playlists = self.api_call(self._MY_PLAYLISTS_URL)['data']
 
         if prefixes is None:
             return all_playlists
 
         return [Playlist.from_dict(playlist) for playlist
-                in all_playlists
-                if playlist['title'].startswith(tuple(prefixes))
+                in tqdm(all_playlists)
+                if playlist['title'].startswith(tuple(prefixes))]
 
     def api_call(self, url):
         return json.loads(
-            requests.get(url, params=self._request_params).text)['data']
+            requests.get(url, params=self._request_params).text)
+
+    def get_tracks_for_playlists(self, playlists):
+        return self._flatten([self.get_tracks_for_playlist(playlist)
+                              for playlist
+                              in tqdm(playlists)])
+
+    @staticmethod
+    def _flatten(list_of_lists):
+        return [item for a_list in list_of_lists for item in a_list]
+
+    def get_tracks_for_playlist(self, playlist):
+        return self._get_all_pages(
+            self._PLAYLIST_TRACKS_URL.format(playlist.id),
+            lambda track: Track.from_dict(track))
+
+    def _get_all_pages(self, url, from_dict):
+        page = self.api_call(url)
+        if 'next' not in page:
+            return [from_dict(page) for page in page['data']]
+        else:
+            return [page for page in tqdm(page['data'])] + self._get_all_pages(page['next'])

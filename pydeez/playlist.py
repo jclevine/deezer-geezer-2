@@ -5,6 +5,10 @@ class Playlist:
         self._track_count = track_count
 
     @property
+    def id(self):
+        return self._id
+
+    @property
     def title(self):
         return self._title
 
