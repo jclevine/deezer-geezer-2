@@ -59,7 +59,7 @@ class PyDeez:
 
         for i, subplaylist in enumerate(playlist_chunks):
             new_subplaylist_title = self._build_playlist_title(new_playlist_name_prefix, i)
-            self.create_playlist(new_subplaylist_title)
+            new_playlist_id = self.create_playlist(new_subplaylist_title)
             pass
 
     def create_playlist(self, playlist_title):
