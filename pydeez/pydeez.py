@@ -26,7 +26,7 @@ class PyDeez:
             return all_playlists
 
         return [Playlist.from_dict(playlist) for playlist
-                in tqdm(all_playlists)
+                in all_playlists
                 if playlist['title'].startswith(tuple(prefixes))]
 
     def api_call(self, url):
@@ -53,3 +53,11 @@ class PyDeez:
             return [from_dict(page) for page in page['data']]
         else:
             return [page for page in tqdm(page['data'])] + self._get_all_pages(page['next'])
+
+    def create_playlists(self, tracks, new_playlist_name_prefix):
+        playlist_chunks = self.chunkify(tracks, self._MAX_PLAYLIST_SIZE)
+        pass
+
+    @staticmethod
+    def chunkify(a_list, sublist_size):
+        return [a_list[i:i + sublist_size] for i in range(0, len(a_list), sublist_size)]

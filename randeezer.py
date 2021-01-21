@@ -1,6 +1,7 @@
 from getpass import getpass
 from input_tool import get_input_list
 from pydeez import PyDeez
+from random import sample
 
 
 def main():
@@ -13,7 +14,9 @@ def main():
     print("Enter the prefixes of the playlists you want to include. Leave it empty when you're done:\n")
     prefixes = get_input_list()
 
-    randeezer(pydeez, prefixes)
+    tracks = randeezer(pydeez, prefixes)
+
+    pydeez.create_playlists(tracks, 'all')
 
 
 def randeezer(pydeez, prefixes):
@@ -25,6 +28,10 @@ def randeezer(pydeez, prefixes):
         sum([playlist.track_count for playlist in playlists])))
 
     tracks = pydeez.get_tracks_for_playlists(playlists)
+    print('Total Number of Tracks Received: {}'.format(len(tracks)))
+
+    print('Randomizing tracks...')
+    return sample(list(set(tracks)), len(list(set(tracks))))
 
 
 if __name__ == "__main__":
