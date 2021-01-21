@@ -20,7 +20,7 @@ class PyDeez:
         }
 
     def get_playlists(self, prefixes=None):
-        all_playlists = self.api_call(self._MY_PLAYLISTS_URL)['data']
+        all_playlists = self._api_get(self._MY_PLAYLISTS_URL)['data']
 
         if prefixes is None:
             return all_playlists
@@ -29,7 +29,7 @@ class PyDeez:
                 in all_playlists
                 if playlist['title'].startswith(tuple(prefixes))]
 
-    def api_call(self, url):
+    def _api_get(self, url):
         return json.loads(
             requests.get(url, params=self._request_params).text)
 
@@ -48,7 +48,7 @@ class PyDeez:
             lambda track: Track.from_dict(track))
 
     def _get_all_pages(self, url, from_dict):
-        page = self.api_call(url)
+        page = self._api_get(url)
         if 'next' not in page:
             return [from_dict(page) for page in page['data']]
         else:
@@ -56,7 +56,22 @@ class PyDeez:
 
     def create_playlists(self, tracks, new_playlist_name_prefix):
         playlist_chunks = self.chunkify(tracks, self._MAX_PLAYLIST_SIZE)
-        pass
+
+        for i, subplaylist in enumerate(playlist_chunks):
+            new_subplaylist_title = self._build_playlist_title(new_playlist_name_prefix, i)
+            self.create_playlist(new_subplaylist_title)
+            pass
+
+    def create_playlist(self, playlist_title):
+        response = requests.post(self._MY_PLAYLISTS_URL, params={
+            **self._request_params,
+            'title': playlist_title
+        })
+        return json.loads(response.text)['id']
+
+    @staticmethod
+    def _build_playlist_title(prefix, i):
+        return prefix + '-{0:0>2}'.format(i)
 
     @staticmethod
     def chunkify(a_list, sublist_size):
