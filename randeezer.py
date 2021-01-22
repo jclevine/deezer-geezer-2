@@ -16,13 +16,7 @@ def main():
 
     tracks = randeezer(pydeez, prefixes)
 
-    # proceed_to_remove_rated_tracks = yes_no_query("Would you like to remove your already rated tracks (including "
-    #                                               "playlists starting with 'favourite' and 'nope')?",
-    #                                               default=False)
-    proceed_to_remove_rated_tracks = True
-
-    if proceed_to_remove_rated_tracks:
-        tracks = remove_tracks(pydeez, tracks, ['favourite', 'nope'], include_favourites=True)
+    tracks = remove_tracks(pydeez, tracks, ['favourite', 'nope'], include_favourites=True)
 
     pydeez.create_playlists(tracks, 'all')
 
@@ -34,12 +28,6 @@ def randeezer(pydeez, prefixes):
     print([playlist.title for playlist in playlists])
     print('Total Number of Tracks: {}'.format(
         sum([playlist.track_count for playlist in playlists])))
-
-    # proceed_to_randomize = yes_no_query('Is this what you wanted?', default=False)
-    proceed_to_randomize = True
-
-    if not proceed_to_randomize:
-        exit(1)
 
     tracks = pydeez.get_tracks_for_playlists(playlists)
     print('Total Number of Tracks Received: {}'.format(len(tracks)))

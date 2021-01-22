@@ -8,10 +8,12 @@ from tqdm import tqdm
 class PyDeez:
     _BASE_URL = 'http://api.deezer.com'
     _MY_PLAYLISTS_URL = '{}{}'.format(_BASE_URL, '/user/me/playlists')
-    _PLAYLIST_TRACKS_URL = '{}/playlist/{{}}/tracks'.format(_BASE_URL)
+    _PLAYLIST_URL = '{}/playlist/{{}}'.format(_BASE_URL)
+    _PLAYLIST_TRACKS_URL = '{}/tracks'.format(_PLAYLIST_URL)
     _MY_FAVOURITES_URL = '{}{}'.format(_BASE_URL, '/user/me/tracks')
     _TRACK_URL = '{}/track/{{}}'.format(_BASE_URL)
     _MAX_PLAYLIST_SIZE = 2000
+    _MAX_TRACKS_IN_URL = 10
 
     def __init__(self, access_token):
         self._request_params = {
@@ -29,6 +31,9 @@ class PyDeez:
         return [Playlist.from_dict(playlist) for playlist
                 in all_playlists
                 if playlist['title'].startswith(tuple(prefixes))]
+
+    def get_playlist_by_id(self, playlist_id):
+        return Playlist.from_dict(self._api_get(self._PLAYLIST_URL.format(playlist_id)))
 
     def get_favourite_tracks(self):
         return self._get_all_pages(self._MY_FAVOURITES_URL,
@@ -57,15 +62,35 @@ class PyDeez:
         if 'next' not in page:
             return [from_dict(page) for page in page['data']]
         else:
-            return [page for page in tqdm(page['data'])] + self._get_all_pages(page['next'])
+            return [page for page in tqdm(page['data'], desc='{} pages'.format(url))] + self._get_all_pages(page['next'])
 
     def create_playlists(self, tracks, new_playlist_name_prefix):
         playlist_chunks = self.chunkify(tracks, self._MAX_PLAYLIST_SIZE)
 
-        for i, subplaylist in enumerate(playlist_chunks):
+        for i, subplaylist in tqdm(enumerate(playlist_chunks)):
             new_subplaylist_title = self._build_playlist_title(new_playlist_name_prefix, i)
             new_playlist_id = self.create_playlist(new_subplaylist_title)
-            pass
+
+            url_friendly_subplaylist_chunks = self.chunkify(subplaylist, self._MAX_TRACKS_IN_URL)
+
+            total_added_count = 0
+            for url_friendly_subplaylist_chunk in tqdm(url_friendly_subplaylist_chunks):
+                url_friendly_ids = [str(track.id) for track in url_friendly_subplaylist_chunk]
+                self.add_tracks_to_playlist_by_track_ids(new_playlist_id, url_friendly_ids)
+                updated_playlist = self.get_playlist_by_id(new_playlist_id)
+
+                expected_new_playlist_size = total_added_count + self._MAX_TRACKS_IN_URL
+                if updated_playlist.track_count != expected_new_playlist_size:
+                    print('Not all the tracks were added for chunk: {}'.format(','.join(url_friendly_subplaylist_chunk)))
+                    track_missing_count = expected_new_playlist_size - updated_playlist.track_count
+                    print('{} of the tracks were not added'.format(track_missing_count))
+                total_added_count = updated_playlist.track_count
+
+    def add_tracks_to_playlist_by_track_ids(self, playlist_id, track_ids):
+        requests.post(self._PLAYLIST_TRACKS_URL.format(playlist_id), params={
+            **self._request_params,
+            'songs': ','.join(track_ids)
+        })
 
     def create_playlist(self, playlist_title):
         response = requests.post(self._MY_PLAYLISTS_URL, params={
