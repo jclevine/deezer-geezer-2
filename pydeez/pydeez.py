@@ -9,6 +9,7 @@ class PyDeez:
     _BASE_URL = 'http://api.deezer.com'
     _MY_PLAYLISTS_URL = '{}{}'.format(_BASE_URL, '/user/me/playlists')
     _PLAYLIST_TRACKS_URL = '{}/playlist/{{}}/tracks'.format(_BASE_URL)
+    _MY_FAVOURITES_URL = '{}{}'.format(_BASE_URL, '/user/me/tracks')
     _TRACK_URL = '{}/track/{{}}'.format(_BASE_URL)
     _MAX_PLAYLIST_SIZE = 2000
 
@@ -28,6 +29,10 @@ class PyDeez:
         return [Playlist.from_dict(playlist) for playlist
                 in all_playlists
                 if playlist['title'].startswith(tuple(prefixes))]
+
+    def get_favourite_tracks(self):
+        return self._get_all_pages(self._MY_FAVOURITES_URL,
+                                   lambda track: Track.from_dict(track))
 
     def _api_get(self, url):
         return json.loads(
