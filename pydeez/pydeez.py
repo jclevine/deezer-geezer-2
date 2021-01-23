@@ -2,7 +2,8 @@ import requests
 import json
 from .playlist import Playlist
 from .track import Track
-from tqdm import tqdm
+from tqdm import tqdm as statusify
+from time import sleep
 
 
 class PyDeez:
@@ -46,7 +47,7 @@ class PyDeez:
     def get_tracks_for_playlists(self, playlists):
         return self._flatten([self.get_tracks_for_playlist(playlist)
                               for playlist
-                              in tqdm(playlists)])
+                              in statusify(playlists, desc='Retrieving Playlist Tracks')])
 
     @staticmethod
     def _flatten(list_of_lists):
@@ -62,26 +63,31 @@ class PyDeez:
         if 'next' not in page:
             return [from_dict(page) for page in page['data']]
         else:
-            return [page for page in tqdm(page['data'], desc='{} pages'.format(url))] + self._get_all_pages(page['next'])
+            return [page for page in statusify(page['data'], desc='{} pages'.format(url))] + self._get_all_pages(page['next'])
 
     def create_playlists(self, tracks, new_playlist_name_prefix):
         playlist_chunks = self.chunkify(tracks, self._MAX_PLAYLIST_SIZE)
 
-        for i, subplaylist in tqdm(enumerate(playlist_chunks)):
+        for i, subplaylist in enumerate(playlist_chunks):
+            if i % 3 == 0:
+                print('Pausing for a minute; throttling for the Deezer API...')
+                sleep(60)
+
+            print('Creating Playlist: {}/{}'.format(i+1, len(playlist_chunks)))
             new_subplaylist_title = self._build_playlist_title(new_playlist_name_prefix, i)
             new_playlist_id = self.create_playlist(new_subplaylist_title)
 
             url_friendly_subplaylist_chunks = self.chunkify(subplaylist, self._MAX_TRACKS_IN_URL)
 
             total_added_count = 0
-            for url_friendly_subplaylist_chunk in tqdm(url_friendly_subplaylist_chunks):
+            for url_friendly_subplaylist_chunk in statusify(url_friendly_subplaylist_chunks, desc='Chunks of Playlist'):
                 url_friendly_ids = [str(track.id) for track in url_friendly_subplaylist_chunk]
                 self.add_tracks_to_playlist_by_track_ids(new_playlist_id, url_friendly_ids)
                 updated_playlist = self.get_playlist_by_id(new_playlist_id)
 
                 expected_new_playlist_size = total_added_count + self._MAX_TRACKS_IN_URL
                 if updated_playlist.track_count != expected_new_playlist_size:
-                    print('Not all the tracks were added for chunk: {}'.format(','.join(url_friendly_subplaylist_chunk)))
+                    print('Not all the tracks were added for chunk: {}'.format(','.join(url_friendly_ids)))
                     track_missing_count = expected_new_playlist_size - updated_playlist.track_count
                     print('{} of the tracks were not added'.format(track_missing_count))
                 total_added_count = updated_playlist.track_count
@@ -106,3 +112,14 @@ class PyDeez:
     @staticmethod
     def chunkify(a_list, sublist_size):
         return [a_list[i:i + sublist_size] for i in range(0, len(a_list), sublist_size)]
+
+    def delete_playlists(self, prefixes):
+        raw_playlists = self._api_get(self._MY_PLAYLISTS_URL)['data']
+        for raw_playlist in statusify(raw_playlists, 'Deleting Playlists If Starting With {}'.format(prefixes)):
+            playlist = Playlist.from_dict(raw_playlist)
+            if playlist.title.startswith(tuple(prefixes)):
+                self.delete_playlist_by_id(playlist.id)
+
+    def delete_playlist_by_id(self, playlist_id):
+        requests.delete(self._PLAYLIST_URL.format(playlist_id), params={**self._request_params})
+

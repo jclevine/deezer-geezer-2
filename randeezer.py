@@ -18,7 +18,14 @@ def main():
 
     tracks = remove_tracks(pydeez, tracks, ['favourite', 'nope'], include_favourites=True)
 
-    pydeez.create_playlists(tracks, 'all')
+    new_prefix = input("What is the prefix you'd like to use for the new playlists? ")
+    pydeez.create_playlists(tracks, new_prefix)
+
+    proceed_with_deletions = yes_no_query('Would you like to delete the old playlists with the prefixes: {}'.
+                                          format(prefixes), default=False)
+
+    if proceed_with_deletions:
+        pydeez.delete_playlists(prefixes=prefixes)
 
 
 def randeezer(pydeez, prefixes):
