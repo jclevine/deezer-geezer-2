@@ -63,8 +63,8 @@ class PyDeez:
         if 'next' not in page:
             return [from_dict(page) for page in page['data']]
         else:
-            return [page for page in statusify(page['data'], desc='{} pages'.format(url))] + self._get_all_pages(page['next'])
-
+            return [from_dict(page) for page in statusify(page['data'], desc='{} pages'.format(url))] + \
+                   self._get_all_pages(page['next'], from_dict)
     def create_playlists(self, tracks, new_playlist_name_prefix):
         playlist_chunks = self.chunkify(tracks, self._MAX_PLAYLIST_SIZE)
 

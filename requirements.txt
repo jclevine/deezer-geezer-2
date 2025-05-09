@@ -1,2 +1,4 @@
-requests
-tqdm
+requests~=2.32.3
+tqdm~=4.67.1
+
+fuzzywuzzy~=0.18.0
