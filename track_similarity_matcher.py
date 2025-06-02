@@ -23,6 +23,21 @@ class SimilarityConfig:
     track_weight: float = 0.7  # Weight for track similarity in combined score
 
 
+class RecommendedConfig:
+    # Artist matching thresholds
+    artist_similarity_threshold: int = 80  # Increase from 75
+    artist_strict_threshold: int = 95  # Increase from 90
+
+    # Track matching thresholds
+    track_similarity_threshold: int = 85  # Increase from 80
+    track_strict_threshold: int = 98  # Increase significantly from 95
+
+    # Combined matching thresholds
+    combined_match_threshold: float = 0.90  # MAJOR CHANGE: Increase from 0.8
+    artist_weight: float = 0.15  # Decrease artist importance
+    track_weight: float = 0.85  # Increase track importance significantly
+
+
 @dataclass
 class MatchResult:
     """Structure to hold detailed match results."""
@@ -290,54 +305,69 @@ class TrackSimilarityMatcher:
 
         return best_match, best_result
 
-    def create_review_file(self, filename: str = None) -> str:
+    def create_review_files(self, base_filename: str = None) -> tuple[str, str]:
         """
-        Create a human-readable review file for manual verification of matches.
+        Create two human-readable review files:
+        - One for matched results (review for false positives)
+        - One for not matched results (review for false negatives)
 
         Returns:
-            The filename of the created review file
+            A tuple: (matched_filename, not_matched_filename)
         """
-        if filename is None:
+        if base_filename is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"match_review_{timestamp}.txt"
+            base_filename = f"match_review_{timestamp}"
 
         # Filter out exact matches for review
-        non_exact = [r for r in self.match_history if not r.is_exact_match]
+        non_exact = (r for r in self.match_history if not r.is_exact_match)
 
-        with open(filename, 'w', encoding='utf-8') as f:
-            f.write("TRACK MATCHING REVIEW FILE\n")
-            f.write("=" * 50 + "\n\n")
-            f.write("INSTRUCTIONS:\n")
-            f.write("- Review each comparison below\n")
-            f.write("- For FALSE NEGATIVES (should match but didn't): Change 'MATCH: NO' to 'MATCH: YES'\n")
-            f.write("- For FALSE POSITIVES (matched but shouldn't): Change 'MATCH: YES' to 'MATCH: NO'\n")
-            f.write("- Leave correct decisions unchanged\n")
-            f.write("- Save this file when done and provide it back for analysis\n\n")
-            f.write("=" * 50 + "\n\n")
+        matched_filename = f"{base_filename}_matched.txt"
+        not_matched_filename = f"{base_filename}_not_matched.txt"
 
-            # Group by match status for easier review
-            matched = [r for r in non_exact if r.is_match]
-            not_matched = [r for r in non_exact if not r.is_match]
+        matched_count = 0
+        not_matched_count = 0
 
-            if matched:
-                f.write("TRACKS THAT WERE MATCHED (Review for False Positives)\n")
-                f.write("-" * 50 + "\n")
-                for i, result in enumerate(matched, 1):
-                    self._write_comparison(f, result, i)
-                f.write("\n")
+        # Open both files for writing
+        with open(matched_filename, 'w', encoding='utf-8') as f_matched, \
+                open(not_matched_filename, 'w', encoding='utf-8') as f_not_matched:
 
-            if not_matched:
-                f.write("TRACKS THAT WERE NOT MATCHED (Review for False Negatives)\n")
-                f.write("-" * 50 + "\n")
-                for i, result in enumerate(not_matched, len(matched) + 1):
-                    self._write_comparison(f, result, i)
+            # Write headers for matched
+            f_matched.write("TRACK MATCHING REVIEW FILE (MATCHED RESULTS)\n")
+            f_matched.write("=" * 50 + "\n\n")
+            f_matched.write("INSTRUCTIONS:\n")
+            f_matched.write("- Review each comparison below\n")
+            f_matched.write("- For FALSE POSITIVES (matched but shouldn't): Change 'MATCH: YES' to 'MATCH: NO'\n")
+            f_matched.write("- Leave correct decisions unchanged\n\n")
+            f_matched.write("=" * 50 + "\n\n")
 
-        print(f"Review file created: {filename}")
-        print(f"Total comparisons for review: {len(non_exact)}")
-        print(f"- Matched pairs: {len(matched)}")
-        print(f"- Not matched pairs: {len(not_matched)}")
+            # Write headers for not matched
+            f_not_matched.write("TRACK MATCHING REVIEW FILE (NOT MATCHED RESULTS)\n")
+            f_not_matched.write("=" * 50 + "\n\n")
+            f_not_matched.write("INSTRUCTIONS:\n")
+            f_not_matched.write("- Review each comparison below\n")
+            f_not_matched.write("- For FALSE NEGATIVES (should match but didn't): Change 'MATCH: NO' to 'MATCH: YES'\n")
+            f_not_matched.write("- Leave correct decisions unchanged\n\n")
+            f_not_matched.write("=" * 50 + "\n\n")
 
-        return filename
+            index_matched = 1
+            index_not_matched = 1
+
+            # Iterate through non-exact matches once, write directly
+            for result in non_exact:
+                if result.is_match:
+                    self._write_comparison(f_matched, result, index_matched)
+                    index_matched += 1
+                    matched_count += 1
+                else:
+                    self._write_comparison(f_not_matched, result, index_not_matched)
+                    index_not_matched += 1
+                    not_matched_count += 1
+
+        print(f"Review files created:")
+        print(f"- {matched_filename} (Matched pairs: {matched_count})")
+        print(f"- {not_matched_filename} (Not matched pairs: {not_matched_count})")
+
+        return matched_filename, not_matched_filename
 
     def _write_comparison(self, f, result: MatchResult, index: int):
         """Write a single comparison to the review file."""
@@ -568,7 +598,7 @@ def example_usage_with_review():
     """Demonstrate the complete workflow including manual review."""
 
     # Create matcher
-    matcher = TrackSimilarityMatcher()
+    matcher = TrackSimilarityMatcher(RecommendedConfig())
 
     # Test some matches that might need review
     test_cases = [
@@ -588,7 +618,7 @@ def example_usage_with_review():
         print(f"Match: {is_match} | '{artist1}' - '{track1}' vs '{artist2}' - '{track2}'")
 
     # Create review file
-    review_file = matcher.create_review_file()
+    review_file = matcher.create_review_files()
 
     print(f"\nReview file created: {review_file}")
     print("Please review the file, make any necessary corrections, and save it.")

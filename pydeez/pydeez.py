@@ -13,6 +13,8 @@ class PyDeez:
     _PLAYLIST_TRACKS_URL = '{}/tracks'.format(_PLAYLIST_URL)
     _MY_FAVOURITES_URL = '{}{}'.format(_BASE_URL, '/user/me/tracks')
     _TRACK_URL = '{}/track/{{}}'.format(_BASE_URL)
+    _SEARCH_URL_PART = 'search'
+    _SEARCH_PLAYLIST_URL = f'{_BASE_URL}/{_SEARCH_URL_PART}/playlist?q={{}}'
     _MAX_PLAYLIST_SIZE = 2000
     _MAX_TRACKS_IN_URL = 10
 
@@ -22,6 +24,13 @@ class PyDeez:
             'expires': 0,
             'limit': self._MAX_PLAYLIST_SIZE
         }
+
+    def get_playlist_by_name(self, name):
+        # Hard-coded 0 since it should only be for one playlist. Should assert.
+        playlists = self._api_get(self._SEARCH_PLAYLIST_URL.format(name))['data']
+        playlist = [playlist for playlist in playlists if playlist['user']['name'] == 'justin.levine'][0]
+        return [Playlist.from_dict(playlist)]
+
 
     def get_playlists(self, prefixes=None):
         all_playlists = self._api_get(self._MY_PLAYLISTS_URL)['data']

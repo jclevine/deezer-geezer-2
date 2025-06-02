@@ -6,145 +6,10 @@ import pickle
 from typing import Set
 from fuzzywuzzy import fuzz
 import csv
+import re
+import pylast
 
-
-class LastFmClient:
-    """Client for interacting with the Last.fm API."""
-
-    def __init__(self, api_key: str, username: str, cache_dir: str = "cache"):
-        """
-        Initialize the Last.fm API client.
-
-        Args:
-            api_key: Last.fm API key
-            username: Last.fm username
-            cache_dir: Directory to store cache files
-        """
-        self.api_key = api_key
-        self.username = username
-        self.base_url = "http://ws.audioscrobbler.com/2.0/"
-        self.cache_dir = cache_dir
-
-        # Create cache directory if it doesn't exist
-        if not os.path.exists(cache_dir):
-            os.makedirs(cache_dir)
-
-    def get_tracks_listened_to_past_year(self) -> Set[str]:
-        """
-        Get all tracks the user has listened to in the past year.
-        Uses caching to avoid refetching data.
-
-        Returns:
-            A set of strings in the format "artist - track" for all tracks listened to
-        """
-        cache_file = os.path.join(self.cache_dir, f"lastfm_tracks_{self.username}.pkl")
-
-        # Try to load from cache first
-        if os.path.exists(cache_file):
-            try:
-                with open(cache_file, 'rb') as f:
-                    cache_data = pickle.load(f)
-                    timestamp = cache_data.get('timestamp', 0)
-                    all_tracks = cache_data.get('tracks', set())
-
-                    # If cache is less than 1 day old, use it
-                    if time.time() - timestamp < 24 * 60 * 60:
-                        print(f"Using cached Last.fm data with {len(all_tracks)} tracks")
-                        return all_tracks
-                    else:
-                        print("Cache is older than 24 hours, refreshing data...")
-            except Exception as e:
-                print(f"Error loading cache: {e}")
-
-        print("Fetching tracks listened to in the past year from Last.fm...")
-
-        # Set to store all tracks
-        all_tracks = set()
-
-        # Get the current timestamp and calculate one year ago
-        current_time = int(time.time())
-        one_year_ago = current_time - (365 * 24 * 60 * 60)
-
-        # Initial parameters
-        params = {
-            'method': 'user.getrecenttracks',
-            'user': self.username,
-            'api_key': self.api_key,
-            'format': 'json',
-            'limit': 200,  # Maximum allowed by Last.fm API
-            'from': one_year_ago,
-            'page': 1
-        }
-
-        total_pages = 1  # Will be updated with the first API call
-        current_page = 1
-
-        try:
-            while current_page <= total_pages:
-                params['page'] = current_page
-
-                # Make the API request
-                response = requests.get(self.base_url, params=params)
-                data = response.json()
-
-                # Check if the request was successful
-                if 'recenttracks' not in data:
-                    print(f"Error fetching tracks from Last.fm: {data}")
-                    break
-
-                # Update total pages
-                total_pages = int(data['recenttracks']['@attr']['totalPages'])
-
-                # Process tracks
-                tracks = data['recenttracks']['track']
-                for track in tracks:
-                    # Skip currently playing track (it doesn't have a date)
-                    if '@attr' in track and track['@attr'].get('nowplaying') == 'true':
-                        continue
-
-                    artist_name = track['artist']['#text']
-                    track_name = track['name']
-                    track_identifier = f"{artist_name} - {track_name}"
-                    all_tracks.add(track_identifier)
-
-                # Save progress to cache after each page (in case of error)
-                if current_page % 5 == 0 or current_page == total_pages:
-                    self._save_tracks_cache(all_tracks)
-
-                print(f"Processed page {current_page}/{total_pages} ({len(all_tracks)} unique tracks so far)")
-                current_page += 1
-
-                # Respect Last.fm API rate limits (5 requests per second)
-                if current_page <= total_pages:
-                    time.sleep(0.2)
-
-        except Exception as e:
-            print(f"Error occurred while fetching Last.fm data: {e}")
-            print("Using partial data collected so far")
-
-        # Save final results to cache
-        self._save_tracks_cache(all_tracks)
-
-        print(f"Found {len(all_tracks)} unique tracks listened to in the past year")
-        return all_tracks
-
-    def _save_tracks_cache(self, tracks: Set[str]):
-        """
-        Save fetched tracks to cache file.
-
-        Args:
-            tracks: Set of track identifiers
-        """
-        cache_file = os.path.join(self.cache_dir, f"lastfm_tracks_{self.username}.pkl")
-        try:
-            with open(cache_file, 'wb') as f:
-                cache_data = {
-                    'timestamp': time.time(),
-                    'tracks': tracks
-                }
-                pickle.dump(cache_data, f)
-        except Exception as e:
-            print(f"Warning: Could not save cache: {e}")
+from track_similarity_matcher import TrackSimilarityMatcher, RecommendedConfig
 
 
 class DeezerFavoritesAnalyzer:
@@ -196,6 +61,8 @@ class DeezerFavoritesAnalyzer:
         print("Fetching favorite tracks from Deezer...")
         try:
             favorite_tracks = self.deezer.get_favourite_tracks()
+            # TODO: Hard-coded index of 0 since it should be only one playlist.Need to assert this.
+            # favorite_tracks = self.deezer.get_tracks_for_playlist(self.deezer.get_playlist_by_name('fresh-favourites')[0])
 
             # Save to cache
             with open(cache_file, 'wb') as f:
@@ -216,7 +83,9 @@ class DeezerFavoritesAnalyzer:
                         favorite_tracks = cache_data.get('tracks', [])
                         print(f"Using older cached data with {len(favorite_tracks)} tracks due to error")
                         return favorite_tracks
-                except Exception:
+                except Exception as e:
+                    print(f"An error occurred: {e}")
+                    traceback.print_exc()
                     pass
 
             # If everything fails, return empty list
@@ -316,44 +185,58 @@ class DeezerFavoritesAnalyzer:
         Returns:
             ID of the created playlist
         """
+        matcher = TrackSimilarityMatcher(RecommendedConfig())
+
         # Get all favorite tracks from Deezer with caching
         favorite_tracks = self._get_favorite_tracks()
         print(f"Found {len(favorite_tracks)} favorite tracks")
 
         # Get all tracks listened to in the past year from Last.fm
         # Uncomment to get tracks from Lastfm
-        # recently_played_tracks = self.lastfm.get_tracks_listened_to_past_year()
+        current_time = int(time.time())
+        days_ago = current_time - (365 * 24 * 60 * 60)
+
+        # testing = self.lastfm.get_recent_tracks(None, True, days_ago, current_time, False, False)
+        recently_played_tracks = self.lastfm.get_recent_tracks(None, True, days_ago, current_time, False, False)
         # Use https://benjaminbenben.com/lastfm-to-csv/ if you want to get an updateds csv!
-        recently_played_tracks = self.load_listened_tracks_from_csv()
+        # recently_played_tracks = self.load_listened_tracks_from_csv()
 
         # Create a set of unheard favorites
         unheard_favorites = []
         track_info_cache = {}  # Cache for track info
-        existing_artist_track_names = []
 
-        for track in favorite_tracks:
+        for i, favourite_track in enumerate(favorite_tracks):
             try:
-                # Extract track info safely
-                artist_name, track_name, track_id = self._extract_track_info(track)
+                if i % 50 == 0 or i == len(favorite_tracks) - 1:
+                    print(f'{i}/{len(favorite_tracks)}')
 
-                # Store in cache for future use
-                track_info_cache[track_id] = (artist_name, track_name)
+                # Favourite track info
+                favourite_artist_name, favourite_track_name, favourite_track_id = self._extract_track_info(
+                    favourite_track)
+                favourite_artist = favourite_track.artist
+                favourite_title = favourite_track.title
 
-                ARTIST_SIMILARITY_THRESHOLD = 90
-                TRACK_SIMILARITY_THRESHOLD = 90
+                # Check if this favourite track matches any recent tracks
+                found_match = False
+                for recent_track in recently_played_tracks:
+                    recent_artist_name = recent_track.track.artist.name
+                    recent_track_title = recent_track.track.title
 
-                # Check if track was recently played using fuzzy matching
-                if not self._is_track_recently_played(artist_name, track_name, recently_played_tracks):
-                    # Check for similarity with already-added tracks
-                    is_similar = any(
-                        fuzz.ratio(artist_name.lower(), existing_artist.lower()) >= ARTIST_SIMILARITY_THRESHOLD and
-                        fuzz.ratio(track_name.lower(), existing_track.lower()) >= TRACK_SIMILARITY_THRESHOLD
-                        for existing_artist, existing_track in existing_artist_track_names
+                    is_match, match_result = matcher.are_tracks_similar(
+                        favourite_artist,
+                        favourite_title,
+                        recent_artist_name,
+                        recent_track_title
                     )
 
-                    if not is_similar:
-                        unheard_favorites.append((track, track_id))
-                        existing_artist_track_names.append((artist_name, track_name))
+                    if is_match:
+                        found_match = True
+                        break
+
+                # If no match found, add to unheard_favorites
+                if not found_match:
+                    unheard_favorites.append((favourite_track, favourite_track_id))
+
             except Exception as e:
                 print(f"Error processing track: {e}")
                 continue
@@ -396,11 +279,22 @@ class DeezerFavoritesAnalyzer:
                 continue
 
         print(f"Successfully created playlist '{playlist_name}' with {len(track_ids)} unheard favorites")
+
+        matched_review_file, nonmatched_review_file = matcher.create_review_files()
+
+        print(f"\nReview file created: {matched_review_file}")
+        print("Please review the file, make any necessary corrections, and save it.")
+        print("Then you can process the feedback using matcher.process_review_file(filename)")
+
+        print(f"\nReview file created: {nonmatched_review_file}")
+        print("Please review the file, make any necessary corrections, and save it.")
+        print("Then you can process the feedback using matcher.process_review_file(filename)")
+
         return new_playlist_id
 
     def _is_track_recently_played(self, artist_name: str, track_name: str,
                                   recently_played_tracks: Set[str],
-                                  similarity_threshold: int = 85) -> bool:
+                                  similarity_threshold: int = 80) -> bool:
         """
         Check if a track was recently played using fuzzy matching.
 
@@ -422,7 +316,10 @@ class DeezerFavoritesAnalyzer:
         for recent_track in recently_played_tracks:
             try:
                 # Calculate similarity ratio
-                similarity = fuzz.ratio(track_identifier.lower(), recent_track.lower())
+                cleaned_track_identifier = clean_track_name(track_identifier.lower())
+                cleaned_recent_track = clean_track_name(recent_track.lower())
+
+                similarity = fuzz.ratio(cleaned_track_identifier, cleaned_recent_track)
 
                 # Check for high similarity
                 if similarity >= similarity_threshold:
@@ -441,10 +338,44 @@ class DeezerFavoritesAnalyzer:
                         print(f"Title match: '{track_name}' ~ '{recent_title}' ({title_similarity}%)")
                         return True
             except Exception as e:
+                print(f"Error: {e}")
                 # If any error in matching, be safe and skip this comparison
                 continue
 
         return False
+
+def clean_track_name(track_name: str) -> str:
+    """Remove common track suffixes that might interfere with matching."""
+    # Common patterns to remove (case insensitive)
+    patterns = [
+        r'\s*\(.*?remaster.*?\)',
+        r'\s*\(.*?remix.*?\)',
+        r'\s*\(.*?version.*?\)',
+        r'\s*\(.*?edit.*?\)',
+        r'\s*\(.*?mix.*?\)',
+        r'\s*\(.*?radio.*?\)',
+        r'\s*\(.*?single.*?\)',
+        r'\s*\(.*?album.*?\)',
+        r'\s*\(.*?deluxe.*?\)',
+        r'\s*\(.*?extended.*?\)',
+        r'\s*\(.*?instrumental.*?\)',
+        r'\s*\(.*?acoustic.*?\)',
+        r'\s*\(.*?live.*?\)',
+        r'\s*\(.*?feat\..*?\)',
+        r'\s*\(.*?ft\..*?\)',
+        r'\s*\[.*?remaster.*?\]',
+        r'\s*\[.*?remix.*?\]',
+        r'\s*\[.*?version.*?\]',
+        r'\s*- remaster',
+        r'\s*- remix',
+        r'\s*- radio edit',
+    ]
+
+    cleaned = track_name
+    for pattern in patterns:
+        cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+
+    return cleaned.strip()
 
 
 def load_config():
@@ -506,7 +437,7 @@ def main():
         # Create API clients
         from pydeez import PyDeez  # Import your existing Deezer client
         deezer_client = PyDeez(deezer_access_token)
-        lastfm_client = LastFmClient(lastfm_api_key, lastfm_username, cache_dir)
+        lastfm_client = pylast.LastFMNetwork(api_key=lastfm_api_key, username=lastfm_username).get_user(lastfm_username)
 
         # Create the analyzer and run
         analyzer = DeezerFavoritesAnalyzer(deezer_client, lastfm_client, cache_dir)
