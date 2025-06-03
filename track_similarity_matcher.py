@@ -4,6 +4,7 @@ from typing import Tuple, Optional, List, Dict, Any
 from fuzzywuzzy import fuzz
 from dataclasses import dataclass, asdict
 from datetime import datetime
+import heapq
 
 
 @dataclass
@@ -353,15 +354,19 @@ class TrackSimilarityMatcher:
             index_not_matched = 1
 
             # Iterate through non-exact matches once, write directly
+            top_non_matches = self._collect_top_non_matches(non_exact, 10000)
+
             for result in non_exact:
                 if result.is_match:
                     self._write_comparison(f_matched, result, index_matched)
                     index_matched += 1
                     matched_count += 1
                 else:
-                    self._write_comparison(f_not_matched, result, index_not_matched)
-                    index_not_matched += 1
-                    not_matched_count += 1
+                    # Only write if this result is in our top non-matches
+                    if result in top_non_matches:
+                        self._write_comparison(f_not_matched, result, index_not_matched)
+                        index_not_matched += 1
+                        not_matched_count += 1
 
         print(f"Review files created:")
         print(f"- {matched_filename} (Matched pairs: {matched_count})")
@@ -384,6 +389,27 @@ class TrackSimilarityMatcher:
             f.write(f"Reason: {', '.join(result.match_reason)}\n")
         f.write("=" * 30 + "\n\n")
 
+    def _collect_top_non_matches(self, non_exact, top_n=10000):
+        """Collect the top N non-matching results using a min-heap."""
+        top_non_matches = []
+
+        for result in non_exact:
+            if not result.is_match:
+                score = result.combined_score
+
+                if len(top_non_matches) < top_n:
+                    heapq.heappush(top_non_matches, (score, result))
+                elif score > top_non_matches[0][0]:  # Better than worst
+                    heapq.heapreplace(top_non_matches, (score, result))
+
+        # Extract results in descending order
+        final_results = []
+        while top_non_matches:
+            score, result = heapq.heappop(top_non_matches)
+            final_results.append(result)
+
+        final_results.reverse()  # Convert to descending score order
+        return final_results
     def process_review_file(self, filename: str) -> Dict[str, Any]:
         """
         Process a reviewed file to identify false positives and false negatives.
