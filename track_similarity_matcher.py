@@ -7,6 +7,80 @@ from datetime import datetime
 import heapq
 
 
+# Compile patterns at module level
+PARENTHESES_PATTERN = re.compile(r'\s*\([^)]*\)')
+BRACKETS_PATTERN = re.compile(r'\s*\[[^\]]*\]')
+WHITESPACE_PATTERN = re.compile(r'\s+')
+
+SUFFIX_PATTERNS = [
+    re.compile(r'\s*-\s*remaster(?:ed)?', re.IGNORECASE),
+    re.compile(r'\s*-\s*remix', re.IGNORECASE),
+    re.compile(r'\s*-\s*radio\s*edit', re.IGNORECASE),
+    re.compile(r'\s*-\s*single\s*version', re.IGNORECASE),
+    re.compile(r'\s*-\s*album\s*version', re.IGNORECASE),
+    re.compile(r'\s*-\s*extended\s*version', re.IGNORECASE),
+]
+
+
+tuples_list = [
+    ('Paul Oakenfold', 'Greece 2000 (Original Mix)'),
+    ('The Beatles', 'Yellow Submarine (Remastered 2009)'),
+    ('Pop Will Eat Itself', 'Kick To Kill'),
+    ('Paul Oakenfold', 'Cafe Del Mar (Three N One Remix)'),
+    ('-', '10 Mumford And Sons - Awake My Soul.mp3'),
+    ('Pop Will Eat Itself', 'Fatman'),
+    ('Paul Oakenfold', 'Purple (Sasha v. The Light)'),
+    ('Pop Will Eat Itself', 'Cape Connection'),
+    ('Front 242', 'Religion (The Prodigy Bass Under Siege Mix)'),
+    ('The Beatles', 'For No One (Remastered 2009)'),
+    ('Ben E. King', 'Stand By Me'),
+    ('Depeche Mode', 'Stjarna'),
+    ('Front 242', 'Happiness (Dance Mix By Underworld)'),
+    ('Front 242', 'Religion (The Prodigy Trance U Down Mix)'),
+    ('Pop Will Eat Itself', 'Everything\'s Cool'),
+    ('Ben E. King', 'Spanish Harlem'),
+    ('Archer Prewitt', 'Raise On High'),
+    ('Front 242', 'Junkdrome (Album Version)'),
+    ('Boredoms', 'Super Going'),
+    ('Willie Nelson', 'Time of the Preacher Theme (Short Version)'),
+    ('Buddy Holly', 'It\'s So Easy'),
+    ('Nirvana', 'Serve The Servants'),
+    ('Aphex Twin', 'Fingerbib'),
+    ('Front 242', 'Junkdrome'),
+    ('Nirvana', 'All Apologies'),
+    ('Mustard Plug', 'Skank By Numbers'),
+    ('The Beatles', 'Her Majesty (Remastered 2009)'),
+    ('Yann Tiersen', 'I\'ve Never Been There'),
+    ('Mumford & Sons', 'Little Lion Man'),
+    ('Lagwagon', 'Tomorrow Is Heartbreak'),
+    ('Chuck Berry', 'Schooldays'),
+    ('Yann Tiersen', 'The Drowned Girl'),
+    ('Freelance Whales', 'Generator (Second Floor)'),
+    ('Yann Tiersen', 'Not That Simple'),
+    ('Childish Gambino', '19:10'),
+    ('London Symphony Orchestra', 'Carmen: Bizet: Carmen: Prélude'),
+    ('Dolly Parton', 'The Salt In My Tears'),
+    ('Yann Tiersen', 'On the Wire (Edit)'),
+    ('Yann Tiersen', 'The Waltz of the Monsters (Accordions)'),
+    ('Royal Concertgebouw Orchestra', 'The Young Person\'s Guide to the Orchestra, Op. 34'),
+    ('Funkadelic', 'Maggot Brain (Alternate Mix)'),
+    ('Delerium', 'Prophecy'),
+    ('Yann Tiersen', 'A quai'),
+    ('Childish Gambino', '35.31'),
+    ('Underworld', 'Dark & Long (Remastered)'),
+    ('Elvis Costello & The Attractions', '(What\'s So Funny ’Bout) Peace, Love And Understanding'),
+    ('The Beatles', 'Honey Don’t (Remastered 2009)'),
+    ('Underworld', 'Dirty Epic'),
+    ('Pop Will Eat Itself', 'Underbelly'),
+    ('Mumford & Sons', 'Little Lion Man'),
+    ('Underworld', 'Cowgirl'),
+    ('The Beatles', 'Eleanor Rigby (Remastered 2009)'),
+    ('Cracker', 'Get Off This'),
+    ('Childish Gambino', '42.26'),
+    ('Underworld', 'M.E. (Remastered)')
+]
+
+
 @dataclass
 class SimilarityConfig:
     """Configuration for similarity matching thresholds."""
@@ -84,26 +158,17 @@ class TrackSimilarityMatcher:
         cleaned = track.strip()
 
         # Remove everything in parentheses
-        cleaned = re.sub(r'\s*\([^)]*\)', '', cleaned)
+        cleaned = PARENTHESES_PATTERN.sub('', cleaned)
 
         # Remove everything in square brackets
-        cleaned = re.sub(r'\s*\[[^\]]*\]', '', cleaned)
+        cleaned = BRACKETS_PATTERN.sub('', cleaned)
 
         # Remove common suffixes that might interfere with matching
-        suffixes_to_remove = [
-            r'\s*-\s*remaster(?:ed)?',
-            r'\s*-\s*remix',
-            r'\s*-\s*radio\s*edit',
-            r'\s*-\s*single\s*version',
-            r'\s*-\s*album\s*version',
-            r'\s*-\s*extended\s*version',
-        ]
-
-        for suffix in suffixes_to_remove:
-            cleaned = re.sub(suffix, '', cleaned, flags=re.IGNORECASE)
+        for pattern in SUFFIX_PATTERNS:
+            cleaned = pattern.sub('', cleaned)
 
         # Clean up extra whitespace
-        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+        cleaned = WHITESPACE_PATTERN.sub(' ', cleaned).strip()
 
         return cleaned.lower()
 
@@ -319,8 +384,8 @@ class TrackSimilarityMatcher:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             base_filename = f"match_review_{timestamp}"
 
-        # Filter out exact matches for review
-        non_exact = (r for r in self.match_history if not r.is_exact_match)
+        # Convert to list instead of generator so we can iterate multiple times
+        non_exact = [r for r in self.match_history if not r.is_exact_match]
 
         matched_filename = f"{base_filename}_matched.txt"
         not_matched_filename = f"{base_filename}_not_matched.txt"
@@ -353,20 +418,57 @@ class TrackSimilarityMatcher:
             index_matched = 1
             index_not_matched = 1
 
-            # Iterate through non-exact matches once, write directly
-            top_non_matches = self._collect_top_non_matches(non_exact, 10000)
+            # # First pass: collect top 10,000 non-matches using heap
+            top_non_matches = []
+            for result in non_exact:
+                if not result.is_match:
+                    score = result.combined_score
 
+                    if len(top_non_matches) < 500:
+                        heapq.heappush(top_non_matches, (score, id(result), result))
+                    elif score > top_non_matches[0][0]:  # Better than worst
+                        heapq.heapreplace(top_non_matches, (score, id(result), result))
+
+            # Sort top non-matches by descending score
+            top_non_matches_sorted = sorted(top_non_matches, key=lambda x: -x[0])
+            top_non_matches_ids = set(item[1] for item in top_non_matches_sorted)
+
+            ########## Hacky to figure out issues with these tracks.
+
+            # First pass: collect top 10,000 non-matches using heap
+            # top_non_matches = []
+            # for result in non_exact:
+            #     if not result.is_match:
+            #         artist, track = result.track1
+            #         if (artist, track) in tuples_list:
+            #             score = result.combined_score
+            #
+            #             if len(top_non_matches) < 500:
+            #                 heapq.heappush(top_non_matches, (score, id(result), result))
+            #             elif score > top_non_matches[0][0]:  # Better than worst
+            #                 heapq.heapreplace(top_non_matches, (score, id(result), result))
+            #
+            # # Sort top non-matches by descending score
+            # top_non_matches_sorted = sorted(top_non_matches, key=lambda x: -x[0])
+            # top_non_matches_ids = set(item[1] for item in top_non_matches_sorted)
+
+            #### End of hacky solution
+
+            print(f"Total non-exact matches: {len(non_exact)}")
+            print(f"Non-matches to review: {len(top_non_matches)}")
+
+            # Write matched (true positive) results
             for result in non_exact:
                 if result.is_match:
                     self._write_comparison(f_matched, result, index_matched)
                     index_matched += 1
                     matched_count += 1
-                else:
-                    # Only write if this result is in our top non-matches
-                    if result in top_non_matches:
-                        self._write_comparison(f_not_matched, result, index_not_matched)
-                        index_not_matched += 1
-                        not_matched_count += 1
+
+            # Write top-scoring non-matches (false negatives) in descending score order
+            for _, _, result in top_non_matches_sorted:
+                self._write_comparison(f_not_matched, result, index_not_matched)
+                index_not_matched += 1
+                not_matched_count += 1
 
         print(f"Review files created:")
         print(f"- {matched_filename} (Matched pairs: {matched_count})")

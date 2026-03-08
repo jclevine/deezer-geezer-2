@@ -1,460 +1,329 @@
-import requests
-import time
 import json
 import os
-import pickle
-from typing import Set
-from fuzzywuzzy import fuzz
-import csv
-import re
+import time
+from datetime import datetime
+from typing import Set, Optional
 import pylast
+from tqdm import tqdm
+import psutil
 
 from track_similarity_matcher import TrackSimilarityMatcher, RecommendedConfig
 
 
 class DeezerFavoritesAnalyzer:
-    """Class to analyze Deezer favorites and create playlists of unheard favorites."""
+    """Analyzes Deezer favorites and creates playlists of unheard tracks."""
 
-    def __init__(self, deezer_client, lastfm_client, cache_dir: str = "cache"):
-        """
-        Initialize with Deezer and Last.fm clients.
-
-        Args:
-            deezer_client: Your existing Deezer API client
-            lastfm_client: The Last.fm API client
-            cache_dir: Directory to store cache files
-        """
+    def __init__(self, deezer_client, lastfm_client):
         self.deezer = deezer_client
         self.lastfm = lastfm_client
-        self.cache_dir = cache_dir
+        self.batch_size = 10  # Deezer API limit for adding tracks
+        self.process = psutil.Process()  # For memory monitoring
 
-        # Create cache directory if it doesn't exist
-        if not os.path.exists(cache_dir):
-            os.makedirs(cache_dir)
+    def _log_memory_usage(self, label: str = ""):
+        """Log current memory usage."""
+        mem_mb = self.process.memory_info().rss / 1024 / 1024
+        print(f"[Memory] {label}: {mem_mb:.1f} MB")
 
-    def _get_favorite_tracks(self):
+    # 2025-10-10 - 259 days ago :: 205 tracks :: 14 hrs 27 min
+    # 2026-01-15 - 309 days ago :: 309 tracks :: 21 hrs 17 min
+    # 2026-01-19 - 290 days ago :: 202 tracks :: 13 hrs 51 min
+    # 2026-01-22 - 280 days ago :: 207 tracks :: 13 hrs 39 min
+    # 2026-02-28 - 300 days ago :: 178 tracks :: 11 hrs 40 min
+    # 2026-03-01 - 270 days ago :: 808 tracks :: 54 hrs 36 min
+    # 2026-03-01 - 300 days ago :: 070 tracks :: 05 hrs 11 min
+    # 2026-03-01 - 285 days ago :: 320 tracks :: 21 hrs 01 min
+    # 2026-03-08 - 270 days ago :: 704 tracks :: 49 hrs 34 min
+    # 2026-03-08 - 296 days ago :: xxx tracks :: xx hrs xx min
+    def create_unheard_favorites_playlist(
+            self,
+            days_lookback: int = 259,
+            problematic_ids: Optional[Set[int]] = None,
+            save_interval: int = 50
+    ) -> Optional[str]:
         """
-        Get all favorite tracks from Deezer with caching support.
-
-        Returns:
-            List of favorite tracks
-        """
-        cache_file = os.path.join(self.cache_dir, "deezer_favorites.pkl")
-
-        # Try to load from cache first
-        if os.path.exists(cache_file):
-            try:
-                with open(cache_file, 'rb') as f:
-                    cache_data = pickle.load(f)
-                    timestamp = cache_data.get('timestamp', 0)
-                    favorite_tracks = cache_data.get('tracks', [])
-
-                    # If cache is less than 1 day old, use it
-                    if time.time() - timestamp < 24 * 60 * 60:
-                        print(f"Using cached Deezer favorites with {len(favorite_tracks)} tracks")
-                        return favorite_tracks
-                    else:
-                        print("Cache is older than 24 hours, refreshing data...")
-            except Exception as e:
-                print(f"Error loading cache: {e}")
-
-        print("Fetching favorite tracks from Deezer...")
-        try:
-            favorite_tracks = self.deezer.get_favourite_tracks()
-            # TODO: Hard-coded index of 0 since it should be only one playlist.Need to assert this.
-            # favorite_tracks = self.deezer.get_tracks_for_playlist(self.deezer.get_playlist_by_name('fresh-favourites')[0])
-
-            # Save to cache
-            with open(cache_file, 'wb') as f:
-                cache_data = {
-                    'timestamp': time.time(),
-                    'tracks': favorite_tracks
-                }
-                pickle.dump(cache_data, f)
-
-            return favorite_tracks
-        except Exception as e:
-            print(f"Error fetching Deezer favorites: {e}")
-            # If we have a cache file, but it's old, still use it in case of error
-            if os.path.exists(cache_file):
-                try:
-                    with open(cache_file, 'rb') as f:
-                        cache_data = pickle.load(f)
-                        favorite_tracks = cache_data.get('tracks', [])
-                        print(f"Using older cached data with {len(favorite_tracks)} tracks due to error")
-                        return favorite_tracks
-                except Exception as e:
-                    print(f"An error occurred: {e}")
-                    traceback.print_exc()
-                    pass
-
-            # If everything fails, return empty list
-            print("Failed to get favorite tracks")
-            return []
-
-    def _extract_track_info(self, track):
-        """
-        Safely extract artist name and track title from track object.
-        Handles both dictionary-like and object-like track representations.
+        Create a playlist of favorite tracks not listened to in the specified timeframe.
+        Saves progress incrementally to avoid data loss.
 
         Args:
-            track: Track object/dict from Deezer API
+            days_lookback: Number of days to look back in listening history
+            problematic_ids: Set of track IDs to exclude
+            save_interval: Save playlist after every N unheard tracks found
 
         Returns:
-            Tuple of (artist_name, track_name, track_id)
+            ID of the created playlist or None if no tracks found
         """
-        try:
-            # Try dictionary access first (most common)
-            if isinstance(track, dict):
-                artist_name = track['artist']['name']
-                track_name = track['title']
-                track_id = track['id']
-            # Try object access (if Track is a custom class)
-            else:
-                # Try different attribute access patterns
-                if hasattr(track, 'artist') and hasattr(track.artist, 'name'):
-                    artist_name = track.artist.name
-                elif hasattr(track, 'get_artist_name'):
-                    artist_name = track.get_artist_name()
-                else:
-                    artist_name = str(track.artist)
+        if problematic_ids is None:
+            problematic_ids = set()
 
-                if hasattr(track, 'title'):
-                    track_name = track.title
-                elif hasattr(track, 'get_title'):
-                    track_name = track.get_title()
-                else:
-                    track_name = str(track)
+        # Create playlist name with current date
+        playlist_name = datetime.now().strftime("%Y-%m-%d")
+        print(f"Creating playlist: {playlist_name}")
+        self._log_memory_usage("Start")
 
-                if hasattr(track, 'id'):
-                    track_id = track.id
-                elif hasattr(track, 'get_id'):
-                    track_id = track.get_id()
-                else:
-                    # If we can't find an ID, use a fallback
-                    track_id = hash(f"{artist_name}-{track_name}")
-
-            return artist_name, track_name, track_id
-        except Exception as e:
-            # Last resort fallback
-            print(f"Error extracting track info: {e}")
-            print(f"Track object type: {type(track)}")
-            # Try to get a string representation
-            try:
-                track_str = str(track)
-                return "Unknown Artist", track_str, hash(track_str)
-            except:
-                return "Unknown Artist", "Unknown Track", 0
-
-    def load_listened_tracks_from_csv(self) -> set[str]:
-        """
-        Prompts for a CSV file path and loads listened tracks as 'artist - track' strings.
-
-        Assumes:
-        - No header row
-        - Column A = artist (index 0)
-        - Column C = track  (index 2)
-
-        Returns:
-            A set of "artist - track" strings
-        """
-        file_path = input("Paste the full Windows path to your CSV file: ").strip('"')
-
-        if not os.path.isfile(file_path):
-            raise FileNotFoundError(f"File not found: {file_path}")
-
-        listened_tracks = set()
-        with open(file_path, 'r', encoding='latin-1') as f:
-            reader = csv.reader(f)
-            for row in reader:
-                if len(row) >= 3:
-                    artist = row[0].strip()
-                    track = row[2].strip()
-                    if artist and track:
-                        listened_tracks.add(f"{artist} - {track}")
-        print(f"Loaded {len(listened_tracks)} listened tracks from CSV")
-        return listened_tracks
-
-    def create_unheard_favorites_playlist(self, playlist_name: str = "Favorites Not Played in a Year") -> str:
-        """
-        Create a playlist of favorite tracks not listened to in the past year.
-
-        Args:
-            playlist_name: Name for the new playlist
-
-        Returns:
-            ID of the created playlist
-        """
+        # Initialize matcher WITHOUT storing history (memory saver)
         matcher = TrackSimilarityMatcher(RecommendedConfig())
 
-        # Get all favorite tracks from Deezer with caching
-        favorite_tracks = self._get_favorite_tracks()
+        # Fetch favorites
+        print("Fetching favorite tracks from Deezer...")
+        favorite_tracks = self.deezer.get_favourite_tracks()
         print(f"Found {len(favorite_tracks)} favorite tracks")
+        self._log_memory_usage("After loading favorites")
 
-        # Get all tracks listened to in the past year from Last.fm
-        # Uncomment to get tracks from Lastfm
-        current_time = int(time.time())
-        days_ago = current_time - (365 * 24 * 60 * 60)
+        # Filter out problematic tracks
+        favorite_tracks = [t for t in favorite_tracks if t.id not in problematic_ids]
+        print(f"After filtering: {len(favorite_tracks)} tracks")
 
-        # testing = self.lastfm.get_recent_tracks(None, True, days_ago, current_time, False, False)
-        recently_played_tracks = self.lastfm.get_recent_tracks(None, True, days_ago, current_time, False, False)
-        # Use https://benjaminbenben.com/lastfm-to-csv/ if you want to get an updateds csv!
-        # recently_played_tracks = self.load_listened_tracks_from_csv()
+        # Get recent listening history as a memory-efficient set
+        print(f"Fetching Last.fm history (past {days_lookback} days)...")
+        recent_tracks_set = self._get_recent_tracks_set(days_lookback)
+        print(f"Loaded {len(recent_tracks_set)} recent tracks")
+        self._log_memory_usage("After loading Last.fm history")
 
-        # Create a set of unheard favorites
-        unheard_favorites = []
-        track_info_cache = {}  # Cache for track info
+        # Create playlist immediately (so we can add incrementally)
+        playlist_id = self.deezer.create_playlist(playlist_name)
+        print(f"Created playlist with ID: {playlist_id}")
 
-        for i, favourite_track in enumerate(favorite_tracks):
-            try:
-                if i % 50 == 0 or i == len(favorite_tracks) - 1:
-                    print(f'{i}/{len(favorite_tracks)}')
+        # Process favorites and add to playlist incrementally
+        unheard_track_ids = []
+        tracks_processed = 0
 
-                # Favourite track info
-                favourite_artist_name, favourite_track_name, favourite_track_id = self._extract_track_info(
-                    favourite_track)
-                favourite_artist = favourite_track.artist
-                favourite_title = favourite_track.title
+        print("Searching for unheard favorites...")
+        for track in tqdm(favorite_tracks, desc="Processing favorites"):
+            tracks_processed += 1
 
-                # Check if this favourite track matches any recent tracks
-                found_match = False
-                for recent_track in recently_played_tracks:
-                    recent_artist_name = recent_track.track.artist.name
-                    recent_track_title = recent_track.track.title
+            # Check if track was recently played
+            if not self._was_recently_played(
+                    track.artist,
+                    track.title,
+                    recent_tracks_set,
+                    matcher
+            ):
+                unheard_track_ids.append(track.id)
 
-                    is_match, match_result = matcher.are_tracks_similar(
-                        favourite_artist,
-                        favourite_title,
-                        recent_artist_name,
-                        recent_track_title
-                    )
+                # Save progress at intervals
+                if len(unheard_track_ids) >= save_interval:
+                    self._add_tracks_to_playlist(playlist_id, unheard_track_ids)
+                    print(f"\nSaved {len(unheard_track_ids)} tracks to playlist "
+                          f"(processed {tracks_processed}/{len(favorite_tracks)})")
+                    self._log_memory_usage(f"After saving batch at {tracks_processed}")
+                    unheard_track_ids.clear()
 
-                    if is_match:
-                        found_match = True
-                        break
+            # Periodic garbage collection hint for large datasets
+            if tracks_processed % 1000 == 0:
+                import gc
+                gc.collect()
+                self._log_memory_usage(f"After processing {tracks_processed} tracks")
 
-                # If no match found, add to unheard_favorites
-                if not found_match:
-                    unheard_favorites.append((favourite_track, favourite_track_id))
+        # Add any remaining tracks
+        if unheard_track_ids:
+            self._add_tracks_to_playlist(playlist_id, unheard_track_ids)
+            print(f"\nAdded final batch of {len(unheard_track_ids)} tracks")
 
-            except Exception as e:
-                print(f"Error processing track: {e}")
-                continue
+        self._log_memory_usage("Before fetching final count")
 
-        print(f"Found {len(unheard_favorites)} favorite tracks not played in the past year")
+        # Get final count
+        final_tracks = self.deezer.get_tracks_for_playlist(
+            self.deezer.get_playlist_by_name(playlist_name)
+        )
+        total_count = len(list(final_tracks))
 
-        # Create a new playlist with these tracks
-        if not unheard_favorites:
-            print("No unheard favorites found to add to playlist")
+        if total_count == 0:
+            print("No unheard favorites found. Deleting empty playlist.")
+            # Note: Add playlist deletion if your API supports it
             return None
 
-        # Extract track IDs for the playlist
-        track_ids = list(set(track_id for _, track_id in unheard_favorites))
+        print(f"\n✓ Successfully created playlist '{playlist_name}' with {total_count} unheard favorites")
+        return playlist_id
 
-        # Save the track info cache
-        cache_file = os.path.join(self.cache_dir, "track_info_cache.pkl")
-        try:
-            with open(cache_file, 'wb') as f:
-                pickle.dump(track_info_cache, f)
-        except Exception as e:
-            print(f"Warning: Could not save track info cache: {e}")
-
-        # Create the playlist and add tracks
-        print(f"Creating playlist '{playlist_name}' with {len(track_ids)} tracks")
-        new_playlist_id = self.deezer.create_playlist(playlist_name)
-
-        # Add tracks in chunks (Deezer API has limitations)
-        chunk_size = 50  # Deezer's limit for adding tracks in one request
-        track_id_chunks = self.deezer.chunkify(track_ids, chunk_size)
-
-        for i, chunk in enumerate(track_id_chunks):
-            print(f"Adding chunk {i + 1}/{len(track_id_chunks)} to playlist")
-            try:
-                string_track_ids = [str(track_id) for track_id in chunk]
-                self.deezer.add_tracks_to_playlist_by_track_ids(new_playlist_id, string_track_ids)
-                time.sleep(1)  # Respect API rate limits
-            except Exception as e:
-                print(f"Error adding chunk {i + 1}: {e}")
-                print("Continuing with next chunk...")
-                continue
-
-        print(f"Successfully created playlist '{playlist_name}' with {len(track_ids)} unheard favorites")
-
-        matched_review_file, nonmatched_review_file = matcher.create_review_files()
-
-        print(f"\nReview file created: {matched_review_file}")
-        print("Please review the file, make any necessary corrections, and save it.")
-        print("Then you can process the feedback using matcher.process_review_file(filename)")
-
-        print(f"\nReview file created: {nonmatched_review_file}")
-        print("Please review the file, make any necessary corrections, and save it.")
-        print("Then you can process the feedback using matcher.process_review_file(filename)")
-
-        return new_playlist_id
-
-    def _is_track_recently_played(self, artist_name: str, track_name: str,
-                                  recently_played_tracks: Set[str],
-                                  similarity_threshold: int = 80) -> bool:
+    def _get_recent_tracks_set(self, days_lookback: int) -> Set[tuple]:
         """
-        Check if a track was recently played using fuzzy matching.
-
-        Args:
-            artist_name: Name of the artist
-            track_name: Name of the track
-            recently_played_tracks: Set of recently played tracks in "artist - track" format
-            similarity_threshold: Minimum similarity score (0-100) to consider a match
+        Fetch recent tracks from Last.fm as a memory-efficient set.
 
         Returns:
-            True if track was recently played, False otherwise
+            Set of (artist_name, track_title) tuples
         """
-        # Exact match check first (faster)
-        track_identifier = f"{artist_name} - {track_name}"
-        if track_identifier in recently_played_tracks:
+        current_time = int(time.time())
+        seconds_ago = current_time - (days_lookback * 24 * 60 * 60)
+
+        recent_plays = self.lastfm.get_recent_tracks(
+            None, True, seconds_ago, current_time, False, False
+        )
+
+        # Store only essential data: (artist, title) tuples
+        recent_tracks_set = set()
+        for play in recent_plays:
+            try:
+                artist = play.track.artist.name.lower().strip()
+                title = play.track.title.lower().strip()
+                recent_tracks_set.add((artist, title))
+            except AttributeError:
+                continue
+
+        return recent_tracks_set
+
+    def _was_recently_played(
+            self,
+            artist: str,
+            title: str,
+            recent_tracks_set: Set[tuple],
+            matcher: TrackSimilarityMatcher
+    ) -> bool:
+        """
+        Check if a track was recently played using optimized matching.
+
+        Args:
+            artist: Artist name to check
+            title: Track title to check
+            recent_tracks_set: Set of recent (artist, title) tuples
+            matcher: TrackSimilarityMatcher instance
+
+        Returns:
+            True if track was recently played
+        """
+        # Quick exact match check (O(1) lookup)
+        artist_lower = artist.lower().strip()
+        title_lower = title.lower().strip()
+
+        if (artist_lower, title_lower) in recent_tracks_set:
             return True
 
-        # Try fuzzy matching if no exact match
-        for recent_track in recently_played_tracks:
-            try:
-                # Calculate similarity ratio
-                cleaned_track_identifier = clean_track_name(track_identifier.lower())
-                cleaned_recent_track = clean_track_name(recent_track.lower())
-
-                similarity = fuzz.ratio(cleaned_track_identifier, cleaned_recent_track)
-
-                # Check for high similarity
-                if similarity >= similarity_threshold:
-                    print(f"Fuzzy match: '{track_identifier}' ~ '{recent_track}' ({similarity}%)")
-                    return True
-
-                # Also try matching just the track name (ignoring artist differences)
-                # This helps with "feat." variations or slight artist name differences
-                recent_parts = recent_track.split(" - ", 1)
-                if len(recent_parts) > 1:
-                    recent_artist, recent_title = recent_parts
-
-                    # Check track title similarity
-                    title_similarity = fuzz.ratio(track_name.lower(), recent_title.lower())
-                    if title_similarity >= 90 and fuzz.ratio(artist_name.lower(), recent_artist.lower()) >= 70:
-                        print(f"Title match: '{track_name}' ~ '{recent_title}' ({title_similarity}%)")
-                        return True
-            except Exception as e:
-                print(f"Error: {e}")
-                # If any error in matching, be safe and skip this comparison
-                continue
+        # Fuzzy matching only if exact match fails
+        # CRITICAL: store_result=False prevents memory leak
+        for recent_artist, recent_title in recent_tracks_set:
+            is_match, _ = matcher.are_tracks_similar(
+                artist, title, recent_artist, recent_title,
+                store_result=False  # DO NOT STORE - prevents memory leak
+            )
+            if is_match:
+                return True
 
         return False
 
-def clean_track_name(track_name: str) -> str:
-    """Remove common track suffixes that might interfere with matching."""
-    # Common patterns to remove (case insensitive)
-    patterns = [
-        r'\s*\(.*?remaster.*?\)',
-        r'\s*\(.*?remix.*?\)',
-        r'\s*\(.*?version.*?\)',
-        r'\s*\(.*?edit.*?\)',
-        r'\s*\(.*?mix.*?\)',
-        r'\s*\(.*?radio.*?\)',
-        r'\s*\(.*?single.*?\)',
-        r'\s*\(.*?album.*?\)',
-        r'\s*\(.*?deluxe.*?\)',
-        r'\s*\(.*?extended.*?\)',
-        r'\s*\(.*?instrumental.*?\)',
-        r'\s*\(.*?acoustic.*?\)',
-        r'\s*\(.*?live.*?\)',
-        r'\s*\(.*?feat\..*?\)',
-        r'\s*\(.*?ft\..*?\)',
-        r'\s*\[.*?remaster.*?\]',
-        r'\s*\[.*?remix.*?\]',
-        r'\s*\[.*?version.*?\]',
-        r'\s*- remaster',
-        r'\s*- remix',
-        r'\s*- radio edit',
-    ]
+    def _add_tracks_to_playlist(self, playlist_id: str, track_ids: list):
+        """
+        Add tracks to playlist in batches respecting API limits.
 
-    cleaned = track_name
-    for pattern in patterns:
-        cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+        Args:
+            playlist_id: Playlist ID
+            track_ids: List of track IDs to add
+        """
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_ids = []
+        for tid in track_ids:
+            if tid not in seen:
+                seen.add(tid)
+                unique_ids.append(tid)
 
-    return cleaned.strip()
+        # Add in batches
+        for i in range(0, len(unique_ids), self.batch_size):
+            batch = unique_ids[i:i + self.batch_size]
+            string_ids = [str(tid) for tid in batch]
+
+            try:
+                self.deezer.add_tracks_to_playlist_by_track_ids(playlist_id, string_ids)
+                time.sleep(0.5)  # Rate limiting
+            except Exception as e:
+                print(f"Warning: Failed to add batch {i // self.batch_size + 1}: {e}")
 
 
-def load_config():
-    """
-    Load configuration from file or create default one if it doesn't exist.
-
-    Returns:
-        Dictionary with configuration
-    """
+def load_config() -> dict:
+    """Load configuration from file or create default."""
     config_file = "config.json"
     default_config = {
         "deezer_access_token": "",
         "lastfm_api_key": "",
-        "lastfm_username": "",
-        "cache_dir": "cache"
+        "lastfm_username": ""
     }
 
     if os.path.exists(config_file):
         try:
             with open(config_file, 'r') as f:
-                config = json.load(f)
-            print("Loaded configuration from config.json")
-            return config
+                return json.load(f)
         except Exception as e:
-            print(f"Error loading config file: {e}")
+            print(f"Error loading config: {e}")
 
-    # Create default config
     with open(config_file, 'w') as f:
         json.dump(default_config, f, indent=4)
-    print(f"Created default config file at {config_file}")
+    print(f"Created default config at {config_file}")
     return default_config
 
 
+def save_config(config: dict):
+    """Save configuration to file."""
+    with open("config.json", 'w') as f:
+        json.dump(config, f, indent=4)
+
+
 def main():
-    """Main function to run the script."""
+    """Main entry point."""
+    print("=" * 60)
+    print("Deezer Unheard Favorites Playlist Creator")
+    print("=" * 60)
+
     try:
-        # Load or create configuration
+        # Load configuration
         config = load_config()
 
-        # Get API credentials
-        deezer_access_token = config.get("deezer_access_token") or input("Enter your Deezer access token: ")
-        lastfm_api_key = config.get("lastfm_api_key") or input("Enter your Last.fm API key: ")
-        lastfm_username = config.get("lastfm_username") or input("Enter your Last.fm username: ")
-        cache_dir = config.get("cache_dir", "cache")
+        # Get credentials (only prompt if missing)
+        deezer_token = config.get("deezer_access_token")
+        if not deezer_token:
+            deezer_token = input("Enter Deezer access token: ").strip()
+            config["deezer_access_token"] = deezer_token
+            save_config(config)
 
-        # Save the credentials for future use
-        if deezer_access_token != config.get("deezer_access_token") or \
-                lastfm_api_key != config.get("lastfm_api_key") or \
-                lastfm_username != config.get("lastfm_username"):
-            config.update({
-                "deezer_access_token": deezer_access_token,
-                "lastfm_api_key": lastfm_api_key,
-                "lastfm_username": lastfm_username
-            })
-            with open("config.json", 'w') as f:
-                json.dump(config, f, indent=4)
-            print("Saved credentials to config.json")
+        lastfm_key = config.get("lastfm_api_key")
+        if not lastfm_key:
+            lastfm_key = input("Enter Last.fm API key: ").strip()
+            config["lastfm_api_key"] = lastfm_key
+            save_config(config)
 
-        # Create API clients
-        from pydeez import PyDeez  # Import your existing Deezer client
-        deezer_client = PyDeez(deezer_access_token)
-        lastfm_client = pylast.LastFMNetwork(api_key=lastfm_api_key, username=lastfm_username).get_user(lastfm_username)
+        lastfm_user = config.get("lastfm_username")
+        if not lastfm_user:
+            lastfm_user = input("Enter Last.fm username: ").strip()
+            config["lastfm_username"] = lastfm_user
+            save_config(config)
 
-        # Create the analyzer and run
-        analyzer = DeezerFavoritesAnalyzer(deezer_client, lastfm_client, cache_dir)
-        playlist_name = input("Enter name for the new playlist (or press Enter for default): ")
-        if not playlist_name:
-            playlist_name = "Favorites Not Played in a Year"
+        # Initialize API clients
+        from pydeez import PyDeez
+        deezer_client = PyDeez(deezer_token)
+        lastfm_network = pylast.LastFMNetwork(api_key=lastfm_key, username=lastfm_user)
+        lastfm_client = lastfm_network.get_user(lastfm_user)
 
-        playlist_id = analyzer.create_unheard_favorites_playlist(playlist_name)
+        # Get problematic tracks to exclude
+        print("\nLoading problematic tracks...")
+        try:
+            problematic_playlist = deezer_client.get_playlist_by_name('problematic-list-for-results-only')
+            problematic_tracks = set(
+                track.id for track in deezer_client.get_tracks_for_playlist(problematic_playlist)
+            )
+            print(f"Loaded {len(problematic_tracks)} problematic tracks to exclude")
+        except Exception as e:
+            print(f"Note: Could not load problematic tracks ({e})")
+            problematic_tracks = set()
+
+        # Create analyzer and run
+        analyzer = DeezerFavoritesAnalyzer(deezer_client, lastfm_client)
+
+        # Optional: ask for days lookback
+        days_input = input("\nDays of listening history to check (default 259): ").strip()
+        days_lookback = int(days_input) if days_input else 259
+
+        playlist_id = analyzer.create_unheard_favorites_playlist(
+            days_lookback=days_lookback,
+            # problematic_ids=problematic_tracks, Not adding any problematic tracks for now. Maybe they're fixed?
+            save_interval=50  # Save every 50 tracks
+        )
 
         if playlist_id:
-            print(f"Playlist created! ID: {playlist_id}")
-            print(f"You can view it in your Deezer account under '{playlist_name}'")
+            print(f"\n✓ Success! Playlist created with ID: {playlist_id}")
         else:
-            print("No playlist was created.")
+            print("\nNo unheard favorites found.")
 
+    except KeyboardInterrupt:
+        print("\n\nOperation cancelled by user.")
     except Exception as e:
-        print(f"An error occurred: {e}")
+        print(f"\nError: {e}")
         import traceback
         traceback.print_exc()
 

@@ -19,7 +19,7 @@ class Track:
 
     @property
     def album(self):
-        return self._album.title
+        return self._album
 
     @property
     def title(self):
@@ -30,7 +30,7 @@ class Track:
         return Track(
             the_id=the_dict['id'],
             artist=Artist.from_dict(the_dict['artist']),
-            album=Album.from_dict(the_dict['album']),
+            album=Album.from_dict(the_dict['album']) if 'album' in the_dict else the_dict['title'],
             title=the_dict['title']
         )
 
